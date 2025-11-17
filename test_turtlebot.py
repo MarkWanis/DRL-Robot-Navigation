@@ -65,42 +65,7 @@ class td3(object):
 
 # Check if the random goal position is located on an obstacle and do not accept it if it is
 def check_pos(x, y):
-    goal_ok = True
-
-    if -3.8 > x > -6.2 and 6.2 > y > 3.8:
-        goal_ok = False
-
-    if -1.3 > x > -2.7 and 4.7 > y > -0.2:
-        goal_ok = False
-
-    if -0.3 > x > -4.2 and 2.7 > y > 1.3:
-        goal_ok = False
-
-    if -0.8 > x > -4.2 and -2.3 > y > -4.2:
-        goal_ok = False
-
-    if -1.3 > x > -3.7 and -0.8 > y > -2.7:
-        goal_ok = False
-
-    if 4.2 > x > 0.8 and -1.8 > y > -3.2:
-        goal_ok = False
-
-    if 4 > x > 2.5 and 0.7 > y > -3.2:
-        goal_ok = False
-
-    if 6.2 > x > 3.8 and -3.3 > y > -4.2:
-        goal_ok = False
-
-    if 4.2 > x > 1.3 and 3.7 > y > 1.5:
-        goal_ok = False
-
-    if -3.0 > x > -7.2 and 0.5 > y > -1.5:
-        goal_ok = False
-
-    if x > 4.5 or x < -4.5 or y > 4.5 or y < -4.5:
-        goal_ok = False
-
-    return goal_ok
+    return -4 <= x <= 4 and -4 <= y <= 4
 
 
 class GazeboEnv(Node):
@@ -216,7 +181,7 @@ class GazeboEnv(Node):
 
         # Detect if the goal has been reached and give a large positive reward
         if distance < GOAL_REACHED_DIST:
-            env.get_logger().info("GOAL is reached!")
+            self.get_logger().info("GOAL is reached!")
             target = True
             done = True
 
@@ -227,7 +192,7 @@ class GazeboEnv(Node):
         return state, reward, done, target
 
     def reset(self):
-
+        '''
         angle = np.random.uniform(-np.pi, np.pi)
         quaternion = Quaternion.from_euler(0.0, 0.0, angle)
         object_state = self.set_self_state
@@ -250,13 +215,15 @@ class GazeboEnv(Node):
 
         self.odom_x = object_state.pose.position.x
         self.odom_y = object_state.pose.position.y
-
+        '''
+        
         # set a random goal in empty space in environment
         self.change_goal()
         # randomly scatter boxes in the environment
         #self.random_box()
         self.publish_markers([0.0, 0.0])
 
+        '''
         while not self.unpause.wait_for_service(timeout_sec=1.0):
             self.node.get_logger().info('service not available, waiting again...')
 
@@ -264,9 +231,11 @@ class GazeboEnv(Node):
             self.unpause.call_async(Empty.Request())
         except:
             print("/gazebo/unpause_physics service call failed")
+        '''
 
         time.sleep(TIME_DELTA)
-
+        
+        '''
         while not self.pause.wait_for_service(timeout_sec=1.0):
             self.node.get_logger().info('service not available, waiting again...')
 
@@ -274,10 +243,32 @@ class GazeboEnv(Node):
             self.pause.call_async(Empty.Request())
         except:
             print("/gazebo/pause_physics service call failed")
+        '''
 
+        '''
         v_state = []
         v_state[:] = velodyne_data[:]
         laser_state = [v_state]
+        '''
+
+        laser_state = [velodyne_data.copy()]
+
+        # get odometry (use last_odom if available)
+        if last_odom is None:
+            self.get_logger().warn("No odom received; using zeros for position and heading")
+            self.odom_x = 0.0
+            self.odom_y = 0.0
+            angle = 0.0
+        else:
+            self.odom_x = last_odom.pose.pose.position.x
+            self.odom_y = last_odom.pose.pose.position.y
+            quat = Quaternion(
+                last_odom.pose.pose.orientation.w,
+                last_odom.pose.pose.orientation.x,
+                last_odom.pose.pose.orientation.y,
+                last_odom.pose.pose.orientation.z,
+            )
+            angle = round(quat.to_euler(degrees=False)[2], 4)
 
         distance = np.linalg.norm(
             [self.odom_x - self.goal_x, self.odom_y - self.goal_y]
@@ -307,9 +298,14 @@ class GazeboEnv(Node):
 
         robot_state = [distance, theta, 0.0, 0.0]
         state = np.append(laser_state, robot_state)
+
         return state
 
     def change_goal(self):
+        self.goal_x = random.uniform(-4, 4)
+        self.goal_y = random.uniform(-4, 4)
+
+        '''
         # Place a new goal and check if its location is not on one of the obstacles
         if self.upper < 10:
             self.upper += 0.004
@@ -322,6 +318,7 @@ class GazeboEnv(Node):
             self.goal_x = self.odom_x + random.uniform(self.upper, self.lower)
             self.goal_y = self.odom_y + random.uniform(self.upper, self.lower)
             goal_ok = check_pos(self.goal_x, self.goal_y)
+        '''
 
     '''
     def random_box(self):
@@ -416,22 +413,20 @@ class GazeboEnv(Node):
         markerArray3.markers.append(marker3)
         self.publisher3.publish(markerArray3)
 
-    @staticmethod
-    def observe_collision(laser_data):
+    def observe_collision(self, laser_data):
         # Detect a collision from laser data
         min_laser = min(laser_data)
         if min_laser < COLLISION_DIST:
-            env.get_logger().info("Collision is detected!")
+            self.get_logger().info("Collision is detected!")
             return True, True, min_laser
         return False, False, min_laser
 
-    @staticmethod
-    def get_reward(target, collision, action, min_laser):
+    def get_reward(self, target, collision, action, min_laser):
         if target:
-            env.get_logger().info("reward 100")
+            self.get_logger().info("reward 100")
             return 100.0
         elif collision:
-            env.get_logger().info("reward -100")
+            self.get_logger().info("reward -100")
             return -100.0
         else:
             r3 = lambda x: 1 - x if x < 1 else 0.0
@@ -519,7 +514,7 @@ if __name__ == '__main__':
     # Create the network
     network = td3(state_dim, action_dim)
     try:
-        network.load(file_name, "./DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models")
+        network.load(file_name, "./pytorch_models") # network.load(file_name, "./DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models")
     except:
         raise ValueError("Could not load the stored model parameters")
 
