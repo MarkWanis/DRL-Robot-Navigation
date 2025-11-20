@@ -59,6 +59,10 @@ class td3(object):
 
     def load(self, filename, directory):
         # Function to load network parameters
+        print(f"File path: {directory}/{file_name}_actor.pth")
+        #self.actor.load_state_dict(
+        #    torch.load("~/colcon_ws/src/DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models/td3_velodyne_actor.pth")
+        #)
         self.actor.load_state_dict(
             torch.load("%s/%s_actor.pth" % (directory, filename))
         )
@@ -117,7 +121,7 @@ class GazeboEnv(Node):
         target = False
 
         linear_damp = 0.2
-        angular_damp = 0.8
+        angular_damp = 0.4
         
         # Publish the robot action
         vel_cmd = Twist()
@@ -162,22 +166,13 @@ class GazeboEnv(Node):
         # Calculate the relative angle between the robots heading and heading toward the goal
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
-        dot = skew_x * 1 + skew_y * 0
-        mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
-        mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-        beta = math.acos(dot / (mag1 * mag2))
-        if skew_y < 0:
-            if skew_x < 0:
-                beta = -beta
-            else:
-                beta = 0 - beta
+        
+        beta = math.atan2(skew_y, skew_x)
         theta = beta - angle
-        if theta > np.pi:
-            theta = np.pi - theta
-            theta = -np.pi - theta
-        if theta < -np.pi:
-            theta = -np.pi - theta
-            theta = np.pi - theta
+
+        # normalize to [-pi, pi]
+        theta = (theta + math.pi) % (2 * math.pi) - math.pi
+
 
         # Detect if the goal has been reached and give a large positive reward
         if distance < GOAL_REACHED_DIST:
@@ -277,24 +272,11 @@ class GazeboEnv(Node):
         skew_x = self.goal_x - self.odom_x
         skew_y = self.goal_y - self.odom_y
 
-        dot = skew_x * 1 + skew_y * 0
-        mag1 = math.sqrt(math.pow(skew_x, 2) + math.pow(skew_y, 2))
-        mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-        beta = math.acos(dot / (mag1 * mag2))
-
-        if skew_y < 0:
-            if skew_x < 0:
-                beta = -beta
-            else:
-                beta = 0 - beta
+        beta = math.atan2(skew_y, skew_x)
         theta = beta - angle
 
-        if theta > np.pi:
-            theta = np.pi - theta
-            theta = -np.pi - theta
-        if theta < -np.pi:
-            theta = -np.pi - theta
-            theta = np.pi - theta
+        # normalize to [-pi, pi]
+        theta = (theta + math.pi) % (2 * math.pi) - math.pi
 
         robot_state = [distance, theta, 0.0, 0.0]
         state = np.append(laser_state, robot_state)
@@ -302,8 +284,8 @@ class GazeboEnv(Node):
         return state
 
     def change_goal(self):
-        self.goal_x = random.uniform(-4, 4)
-        self.goal_y = random.uniform(-4, 4)
+        self.goal_x = random.uniform(-1, 1)
+        self.goal_y = random.uniform(-1, 1)
 
         '''
         # Place a new goal and check if its location is not on one of the obstacles
@@ -485,7 +467,7 @@ class Velodyne_subscriber(Node):
                 dot = data[i][0] * 1 + data[i][1] * 0
                 mag1 = math.sqrt(math.pow(data[i][0], 2) + math.pow(data[i][1], 2))
                 mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-                beta = math.acos(dot / (mag1 * mag2)) * np.sign(data[i][1])
+                beta = math.acos(dot / (m/pytorch_modelsag1 * mag2)) * np.sign(data[i][1])
                 dist = math.sqrt(data[i][0] ** 2 + data[i][1] ** 2 + data[i][2] ** 2)
 
                 for j in range(len(self.gaps)):
@@ -514,7 +496,7 @@ if __name__ == '__main__':
     # Create the network
     network = td3(state_dim, action_dim)
     try:
-        network.load(file_name, "./pytorch_models") # network.load(file_name, "./DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models")
+        network.load(file_name, "./src/td3/scripts/pytorch_models") # network.load(file_name, "./DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models")
     except:
         raise ValueError("Could not load the stored model parameters")
 

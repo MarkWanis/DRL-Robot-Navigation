@@ -13,7 +13,7 @@ def generate_launch_description():
         # Your RL/test script (runs on real robot)
         Node(
             package='td3',
-            executable='test_velodyne_node.py',
+            executable='test_turtlebot_node.py',
             output='screen'
         ),
 
