@@ -82,7 +82,7 @@ class GazeboEnv(Node):
         self.odom_x = 0
         self.odom_y = 0
 
-        self.goal_x = 1
+        self.goal_x = 0.5
         self.goal_y = 0.0
 
         self.upper = 5.0
@@ -121,7 +121,7 @@ class GazeboEnv(Node):
         target = False
 
         linear_damp = 0.2
-        angular_damp = 0.4
+        angular_damp = 0.6
         
         # Publish the robot action
         vel_cmd = Twist()
@@ -183,6 +183,9 @@ class GazeboEnv(Node):
         robot_state = [distance, theta, action[0], action[1]]
         state = np.append(laser_state, robot_state)
         reward = self.get_reward(target, collision, action, min_laser)
+
+        print(f"State: {state[-4:]}")
+        print(f"Reward: {reward}")
 
         return state, reward, done, target
 
@@ -284,8 +287,8 @@ class GazeboEnv(Node):
         return state
 
     def change_goal(self):
-        self.goal_x = random.uniform(-1, 1)
-        self.goal_y = random.uniform(-1, 1)
+        self.goal_x = random.uniform(0, 1)
+        self.goal_y = random.uniform(0, 1)
 
         '''
         # Place a new goal and check if its location is not on one of the obstacles
