@@ -19,6 +19,8 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from squaternion import Quaternion
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.signals import SignalHandlerOptions
 #from std_srvs.srv import Empty
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
@@ -28,8 +30,11 @@ COLLISION_DIST = 0.35
 TIME_DELTA = 0.2
 
 last_odom = None
+last_odom_time = None 
+last_scan_time = None
 environment_dim = 20
 velodyne_data = np.ones(environment_dim) * 10
+
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim):
@@ -45,6 +50,7 @@ class Actor(nn.Module):
         s = F.relu(self.layer_2(s))
         a = self.tanh(self.layer_3(s))
         return a
+    
 
 # td3 network
 class td3(object):
@@ -55,17 +61,16 @@ class td3(object):
     def get_action(self, state):
         # Function to get the action from the actor
         state = torch.Tensor(state.reshape(1, -1)).to(device)
-        return self.actor(state).cpu().data.numpy().flatten()
+        with torch.no_grad():
+            return self.actor(state).cpu().data.numpy().flatten()
 
     def load(self, filename, directory):
         # Function to load network parameters
-        print(f"File path: {directory}/{file_name}_actor.pth")
-        #self.actor.load_state_dict(
-        #    torch.load("~/colcon_ws/src/DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models/td3_velodyne_actor.pth")
-        #)
-        self.actor.load_state_dict(
-            torch.load("%s/%s_actor.pth" % (directory, filename))
-        )
+        path = f"{directory}/{filename}_actor.pth"
+        print(f"File path: {path}")
+        self.actor.load_state_dict(torch.load(path, map_location=device))
+        self.actor.eval()
+
 
 # Check if the random goal position is located on an obstacle and do not accept it if it is
 def check_pos(x, y):
@@ -77,6 +82,9 @@ class GazeboEnv(Node):
 
     def __init__(self):
         super().__init__('env')
+
+        self.origin_x = None
+        self.origin_y = None
 
         self.environment_dim = 20
         self.odom_x = 0
@@ -188,6 +196,11 @@ class GazeboEnv(Node):
         print(f"Reward: {reward}")
 
         return state, reward, done, target
+    
+
+    def stop(self) -> None:
+        self.vel_pub.publish(Twist())
+
 
     def reset(self):
         '''
@@ -287,8 +300,25 @@ class GazeboEnv(Node):
         return state
 
     def change_goal(self):
-        self.goal_x = random.uniform(0, 1)
-        self.goal_y = random.uniform(0, 1)
+        if self.origin_x is None: # Initialize the origin position on the first call to change_goal
+            self.origin_x = last_odom.pose.pose.position.x
+            self.origin_y = last_odom.pose.pose.position.y
+
+        # Get the robot's current position from the last odometry data
+        rx = last_odom.pose.pose.position.x
+        ry = last_odom.pose.pose.position.y
+        LIMIT = 1.5 
+
+        # Try to find a valid goal position that is not too close to the robot and within the defined limits
+        for _ in range(100):
+            gx = rx + random.uniform(-LIMIT, LIMIT)
+            gy = ry + random.uniform(-LIMIT, LIMIT)
+            if (math.hypot(gx - rx, gy - ry) > 0.7 and abs(gx - self.origin_x) <= LIMIT and abs(gy - self.origin_y) <= LIMIT):
+                self.goal_x, self.goal_y = gx, gy
+                return
+
+        # Aims to set the goal to the origin if no valid position is found after 100 attempts
+        self.goal_x, self.goal_y = self.origin_x, self.origin_y
 
         '''
         # Place a new goal and check if its location is not on one of the obstacles
@@ -423,14 +453,15 @@ class Odom_subscriber(Node):
         super().__init__('odom_subscriber')
         self.subscription = self.create_subscription(
             Odometry,
-            '/odom',
+            "/odom",
             self.odom_callback,
             10)
         self.subscription
 
     def odom_callback(self, od_data):
-        global last_odom
+        global last_odom, last_odom_time
         last_odom = od_data
+        last_odom_time = time.time()
 
 class Velodyne_subscriber(Node):
 
@@ -440,7 +471,7 @@ class Velodyne_subscriber(Node):
             LaserScan,
             "/scan",
             self.scan_callback,
-            10)
+            qos_profile_sensor_data)
         self.subscription
 
         self.gaps = [[-np.pi / 2 - 0.03, -np.pi / 2 + np.pi / environment_dim]]
@@ -451,6 +482,26 @@ class Velodyne_subscriber(Node):
         self.gaps[-1][-1] += 0.03
 
     def scan_callback(self, msg):
+        global velodyne_data, last_scan_time
+
+        ranges = np.array(msg.ranges, dtype=np.float32)
+        angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
+        angles = (angles + np.pi) % (2 * np.pi) - np.pi # wrap to [-pi, pi]
+
+        valid = (np.isfinite(ranges)
+             & (ranges >= msg.range_min)
+             & (ranges <= msg.range_max)
+             & (angles >= -np.pi / 2) & (angles < np.pi / 2))   # front 180° only
+
+        new = np.ones(environment_dim) * 10.0
+        bins = ((angles[valid] + np.pi / 2) / (np.pi / environment_dim)).astype(int)
+        bins = np.clip(bins, 0, environment_dim - 1)
+        np.minimum.at(new, bins, ranges[valid])
+
+        velodyne_data = new
+        last_scan_time = time.time()
+
+        '''
         global velodyne_data
         velodyne_data = np.ones(environment_dim) * 10
         for chunk_index in range(20):
@@ -460,28 +511,27 @@ class Velodyne_subscriber(Node):
             for scan_index, scan_value in enumerate(msg.ranges[chunk_start:chunk_end]):
                 if not np.isnan(scan_value) and scan_value < velodyne_data[chunk_index]: 
                     velodyne_data[chunk_index] = scan_value
-
         '''
-        global velodyne_data
-        data = list(pc2.read_points(v, skip_nans=False, field_names=("x", "y", "z")))
-        velodyne_data = np.ones(environment_dim) * 10
-        for i in range(len(data)):
-            if data[i][2] > -0.2:
-                dot = data[i][0] * 1 + data[i][1] * 0
-                mag1 = math.sqrt(math.pow(data[i][0], 2) + math.pow(data[i][1], 2))
-                mag2 = math.sqrt(math.pow(1, 2) + math.pow(0, 2))
-                beta = math.acos(dot / (m/pytorch_modelsag1 * mag2)) * np.sign(data[i][1])
-                dist = math.sqrt(data[i][0] ** 2 + data[i][1] ** 2 + data[i][2] ** 2)
 
-                for j in range(len(self.gaps)):
-                    if self.gaps[j][0] <= beta < self.gaps[j][1]:
-                        velodyne_data[j] = min(velodyne_data[j], dist)
-                        break
-        '''
+
+def wait_for_sensors(timeout: float = 10.0):
+    start = time.time()
+    while last_odom is None or last_scan_time is None:
+        if time.time() - start > timeout:
+            raise RuntimeError("No /odom or /scan data received")
+        time.sleep(0.1)
+
+
+def sensors_fresh(max_age: float = 0.5):
+    now = time.time()
+    return (last_odom_time is not None and last_scan_time is not None
+            and now - last_odom_time < max_age
+            and now - last_scan_time < max_age)
+
 
 if __name__ == '__main__':
 
-    rclpy.init(args=None)
+    rclpy.init(args=None, signal_handler_options=SignalHandlerOptions.NO) 
 
     # Set the parameters for the implementation
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # cuda or cpu
@@ -500,10 +550,10 @@ if __name__ == '__main__':
     network = td3(state_dim, action_dim)
     try:
         network.load(file_name, "./src/td3/scripts/pytorch_models") # network.load(file_name, "./DRL_robot_navigation_ros2/src/td3/scripts/pytorch_models")
-    except:
-        raise ValueError("Could not load the stored model parameters")
+    except Exception as e:
+        raise ValueError(f"Could not load model: {e}") from e
 
-    done = True
+    done = True # Starts at True to ensure the environment is reset at the beginning of the first episode
     episode_timesteps = 0
 
     # Create the testing environment
@@ -517,32 +567,46 @@ if __name__ == '__main__':
 
     executor_thread = threading.Thread(target=executor.spin, daemon=True)
     executor_thread.start()
+
+    wait_for_sensors()
     
     rate = odom_subscriber.create_rate(2)
 
     # Begin the testing loop
-    while rclpy.ok():
+    try:
+        while rclpy.ok():
 
-        # On termination of episode
-        if done:
-            state = env.reset()
+            # When the robot reaches the goal or collides with an obstacle, reset the environment and start a new episode
+            if done:
+                env.stop()
+                state = env.reset()
+                done = False
+                episode_timesteps = 0
 
+            if not sensors_fresh():
+                env.get_logger().warn("Stale sensor data, stopping")
+                env.stop()
+                time.sleep(0.1)
+                continue
+            
             action = network.get_action(np.array(state))
+
             # Update action to fall in range [0,1] for linear velocity and [-1,1] for angular velocity
             a_in = [(action[0] + 1) / 2, action[1]]
-            next_state, reward, done, target = env.step(a_in)
-            done = 1 if episode_timesteps + 1 == max_ep else int(done)
 
-            done = False
-            episode_timesteps = 0
-        else:
-            action = network.get_action(np.array(state))
-            # Update action to fall in range [0,1] for linear velocity and [-1,1] for angular velocity
-            a_in = [(action[0] + 1) / 2, action[1]]
-            next_state, reward, done, target = env.step(a_in)
-            done = 1 if episode_timesteps + 1 == max_ep else int(done)
+            state, reward, done, target = env.step(a_in)
 
-            state = next_state
             episode_timesteps += 1
+            if episode_timesteps >= max_ep: done = True
+            
 
-    rclpy.shutdown()
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        try:
+            env.stop()
+            time.sleep(0.1)
+        except Exception as e:
+            print(f"Could not send stop command: {e}")
+        rclpy.shutdown()
